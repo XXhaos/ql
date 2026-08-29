@@ -10,6 +10,7 @@
  * 可选环境变量：
  *   NODESEEK_USER_AGENT  浏览器 User-Agent；多账号时可填写 JSON 数组，或在上面的账号对象中单独设置。
  *   NODESEEK_RANDOM      false（默认，固定鸡腿 x 5）/ true（试试手气）。
+ *   NODESEEK_BROWSER_URL Cloudflare 真实浏览器后备服务；默认使用青龙同网络中的 nodeseek-browser。
  *
  * 建议定时：10 0 * * *（与原 Surge 模块一致）
  */
@@ -253,6 +254,8 @@ function requestWithBrowserFingerprint(requestPath, method, account) {
     path: requestPath,
     method,
     cookie: account.cookie,
+    userAgent: account.userAgent,
+    userId: account.userId,
     timeout: Math.ceil(REQUEST_TIMEOUT_MS / 1000),
   });
 
@@ -290,10 +293,22 @@ function requestWithBrowserFingerprint(requestPath, method, account) {
 
 async function requestJson(path, account, options = {}) {
   const method = options.method || "GET";
-  const response = await requestWithBrowserFingerprint(path, method, account);
+  const prefetchedKey = options.prefetchedKey || "";
+  let response = prefetchedKey ? account.prefetched?.[prefetchedKey] : null;
+  if (response && account.prefetched) {
+    delete account.prefetched[prefetchedKey];
+  } else {
+    response = await requestWithBrowserFingerprint(path, method, account);
+  }
+  if (response.prefetched && typeof response.prefetched === "object") {
+    account.prefetched = response.prefetched;
+  }
   if (response.cloudflareChallenge) {
+    const fallback = response.browserFallbackError
+      ? `；真实浏览器后备失败：${cleanText(response.browserFallbackError, 140)}`
+      : "";
     throw new CloudflareChallengeError(
-      `青龙出口被 Cloudflare 挑战（已尝试 ${response.attempts || 1} 种浏览器指纹）；这不是账号 Cookie 过期`
+      `青龙出口被 Cloudflare 挑战${fallback}；这不是账号 Cookie 过期`
     );
   }
   const text = response.text;
@@ -380,7 +395,8 @@ async function signOne(account, index, total, useRandom) {
     try {
       const info = await requestJson(
         `/api/account/getInfo/${encodeURIComponent(account.userId)}?readme=1`,
-        account
+        account,
+        { prefetchedKey: "profile" }
       );
       if (!resultSucceeded(info)) {
         throw new Error(resultMessage(info) || "接口未返回用户资料");
@@ -398,7 +414,9 @@ async function signOne(account, index, total, useRandom) {
   const label = displayName || fallbackLabel;
   let boardText = "";
   try {
-    const board = await requestJson("/api/attendance/board?page=1", account);
+    const board = await requestJson("/api/attendance/board?page=1", account, {
+      prefetchedKey: "board",
+    });
     boardText = boardSummary(board);
   } catch (error) {
     if (error instanceof AccountExpiredError) throw error;
